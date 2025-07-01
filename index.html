@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Live Pulse Waveform</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin: 20px; }
+    canvas { max-width: 100%; height: 300px; }
+    button { margin: 10px; padding: 10px 20px; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <h2>Live Pulse Waveform with Throb Marking</h2>
+  <canvas id="pulseChart"></canvas>
+  <div>
+    <button onclick="markThrob()">Mark Throb</button>
+    <button onclick="exportData()">Export CSV</button>
+  </div>
+
+  <script>
+    const ctx = document.getElementById('pulseChart').getContext('2d');
+    const MAX_POINTS = 500;
+    const pulseData = [];
+    const timeData = [];
+    const throbMarkers = [];
+
+    const pulseChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: timeData,
+        datasets: [
+          {
+            label: 'Pulse',
+            data: pulseData,
+            borderColor: 'blue',
+            fill: false,
+            tension: 0.3,
+            pointRadius: 0
+          },
+          {
+            label: 'Throb Marker',
+            data: [],
+            borderColor: 'red',
+            borderDash: [5, 5],
+            pointRadius: 0,
+            fill: false,
+            showLine: false
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        animation: false,
+        scales: {
+          x: {
+            type: 'linear',
+            title: { display: true, text: 'Time (s)' }
+          },
+          y: {
+            title: { display: true, text: 'Pulse Amplitude' }
+          }
+        },
+        plugins: {
+          legend: { display: true }
+        }
+      }
+    });
+
+    let time = 0;
+    let interval = 50; // ms
+    function simulatePulse() {
+      const freq = 1.3; // Hz
+      const amp = Math.sin(2 * Math.PI * freq * (time / 1000)) + 0.5 * Math.sin(4 * Math.PI * freq * (time / 1000));
+      pulseData.push(amp);
+      timeData.push(time / 1000);
+      if (pulseData.length > MAX_POINTS) {
+        pulseData.shift();
+        timeData.shift();
+      }
+      pulseChart.update();
+      time += interval;
+    }
+    setInterval(simulatePulse, interval);
+
+    function markThrob() {
+      const currentTime = time / 1000;
+      pulseChart.data.datasets[1].data.push({x: currentTime, y: null});
+      throbMarkers.push(currentTime);
+      pulseChart.update();
+    }
+
+    function exportData() {
+      let csv = 'Time,Pulse,Throb\n';
+      for (let i = 0; i < timeData.length; i++) {
+        let t = timeData[i];
+        let p = pulseData[i];
+        let throb = throbMarkers.includes(t) ? 'YES' : '';
+        csv += `${t.toFixed(3)},${p.toFixed(4)},${throb}\n`;
+      }
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'pulse_data.csv';
+      a.click();
+    }
+  </script>
+</body>
+</html>
