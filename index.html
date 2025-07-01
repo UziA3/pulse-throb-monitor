@@ -3,544 +3,295 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Pulse + Throb Recorder with Real Sensor</title>
+<title>Pulse Throb Monitor - Sinusoidal Waveform</title>
 <style>
-  body { font-family: Arial, sans-serif; margin: 20px; background: #f4f7f8; }
-  h1 { text-align: center; }
-  #waveform { border: 1px solid #ccc; background: #fff; display: block; margin: 0 auto; }
-  button { margin: 5px; padding: 10px 15px; font-size: 16px; }
-  #recordingsList { margin-top: 20px; max-width: 600px; margin-left: auto; margin-right: auto; }
-  .recording-item { background: #fff; border: 1px solid #ccc; margin-bottom: 10px; padding: 10px; display: flex; justify-content: space-between; align-items: center; }
-  .recording-item input[type="text"] { font-size: 16px; width: 60%; padding: 4px; }
-  .recording-info { font-size: 14px; color: #555; }
-  .btn-small { font-size: 14px; padding: 6px 10px; margin-left: 5px; }
-  #timer { font-size: 24px; text-align: center; margin-top: 10px; }
-  #status { text-align: center; font-style: italic; margin-top: 10px; color: green; }
+  body { font-family: Arial, sans-serif; margin: 20px; }
+  #pulseCanvas { border: 1px solid #ccc; display: block; margin-bottom: 10px; }
+  button { margin-right: 10px; margin-bottom: 10px; padding: 8px 16px; font-size: 16px; }
+  #recordingsList { margin-top: 20px; }
+  .recordingItem { margin-bottom: 10px; }
 </style>
 </head>
 <body>
 
-<h1>Pulse + Throb Recorder (Real Sensor)</h1>
+<h2>Pulse Throb Monitor</h2>
+<canvas id="pulseCanvas" width="600" height="200"></canvas>
 
-<div style="text-align:center; margin-bottom:10px;">
-  <button id="connectSensorBtn">Connect Heart Rate Sensor</button>
-  <div id="status">Not connected</div>
+<div>
+  <button id="connectBtn">Connect Heart Rate Monitor</button>
+  <button id="startRecordBtn" disabled>Start Recording</button>
+  <button id="pauseRecordBtn" disabled>Pause Recording</button>
+  <button id="resumeRecordBtn" disabled>Resume Recording</button>
+  <button id="stopRecordBtn" disabled>Stop Recording</button>
+  <button id="throbBtn" disabled>Mark Throb</button>
 </div>
 
-<canvas id="waveform" width="700" height="200"></canvas>
-
-<div style="text-align:center; margin-top: 10px;">
-  <button id="startBtn" disabled>Start Recording</button>
-  <button id="pauseBtn" disabled>Pause</button>
-  <button id="resumeBtn" disabled>Resume</button>
-  <button id="stopBtn" disabled>Stop Recording</button>
-  <button id="throbBtn" disabled>Record Throb</button>
+<div>
+  <strong>Timer:</strong> <span id="timer">00:00</span>
 </div>
-
-<div id="timer">00:00</div>
 
 <div id="recordingsList">
-  <h2>Recordings</h2>
-  <div id="recordingsContainer"></div>
-  <button id="downloadAllBtn" disabled>Download All as ZIP</button>
+  <h3>Recordings</h3>
+  <!-- List of saved recordings here -->
 </div>
-
-<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
 <script>
 (() => {
-  const canvas = document.getElementById('waveform');
+  const canvas = document.getElementById('pulseCanvas');
   const ctx = canvas.getContext('2d');
-  const width = canvas.width;
-  const height = canvas.height;
 
-  const connectSensorBtn = document.getElementById('connectSensorBtn');
-  const statusDiv = document.getElementById('status');
-
-  const startBtn = document.getElementById('startBtn');
-  const pauseBtn = document.getElementById('pauseBtn');
-  const resumeBtn = document.getElementById('resumeBtn');
-  const stopBtn = document.getElementById('stopBtn');
+  const connectBtn = document.getElementById('connectBtn');
+  const startRecordBtn = document.getElementById('startRecordBtn');
+  const pauseRecordBtn = document.getElementById('pauseRecordBtn');
+  const resumeRecordBtn = document.getElementById('resumeRecordBtn');
+  const stopRecordBtn = document.getElementById('stopRecordBtn');
   const throbBtn = document.getElementById('throbBtn');
+
   const timerDisplay = document.getElementById('timer');
-  const recordingsContainer = document.getElementById('recordingsContainer');
-  const downloadAllBtn = document.getElementById('downloadAllBtn');
+  const recordingsList = document.getElementById('recordingsList');
 
-  // State
-  let recording = false;
-  let paused = false;
-  let startTime = 0;
-  let elapsed = 0;
-  let animationFrameId = null;
+  let heartRate = 60;
+  let time = 0;
+  let animationId;
 
-  let dataPoints = []; // {time(ms), value(bpm)}
-  let throbs = []; // {time(ms)}
-
-  let recordings = [];
-
-  // For real sensor data
+  // Bluetooth variables
   let hrCharacteristic = null;
-  let hrDevice = null;
 
-  // Buffer to smooth pulse waveform
-  const smoothingWindowMs = 2000; // 2 seconds smoothing
-  const pulseDataBuffer = [];
+  // Recording variables
+  let isRecording = false;
+  let isPaused = false;
+  let recordStartTime = 0;
+  let elapsedBeforePause = 0;
+  let recordedData = []; // {time: seconds, hr: number, throb: boolean}
+  let recordings = []; // saved sessions
 
-  // Timer interval
-  let timerInterval = null;
-
-  // Utils
-  function formatTime(ms) {
-    const totalSeconds = Math.floor(ms / 1000);
-    const m = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
-    const s = (totalSeconds % 60).toString().padStart(2, '0');
-    return `${m}:${s}`;
-  }
-
-  // Draw waveform with real pulse data
-  function drawWaveform() {
-    ctx.clearRect(0, 0, width, height);
-
-    // Draw baseline
-    ctx.strokeStyle = '#ccc';
-    ctx.beginPath();
-    ctx.moveTo(0, height / 2);
-    ctx.lineTo(width, height / 2);
-    ctx.stroke();
-
-    if (dataPoints.length === 0) {
-      ctx.fillStyle = '#888';
-      ctx.font = '16px Arial';
-      ctx.fillText('No pulse data yet', width / 2 - 60, height / 2);
-      return;
-    }
-
-    // Draw line connecting data points (last 10s)
-    ctx.strokeStyle = '#007acc';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-
-    const now = elapsed;
-    const windowDuration = 10 * 1000;
-    const startWindow = Math.max(0, now - windowDuration);
-
-    // Filter points in window and convert time to x
-    const pointsInWindow = dataPoints.filter(p => p.time >= startWindow);
-
-    pointsInWindow.forEach((pt, i) => {
-      // Map bpm value (30-180) to canvas height (bottom to top)
-      const normValue = (pt.value - 30) / (180 - 30); // Normalize
-      const y = height - normValue * height;
-      const x = ((pt.time - startWindow) / windowDuration) * width;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-
-    // Draw throb markers
-    ctx.fillStyle = 'red';
-    throbs.forEach(throb => {
-      if (throb.time >= startWindow && throb.time <= now) {
-        const x = ((throb.time - startWindow) / windowDuration) * width;
-        // Find closest pulse value for vertical position
-        let closestPt = pointsInWindow.reduce((prev, curr) => {
-          return Math.abs(curr.time - throb.time) < Math.abs(prev.time - throb.time) ? curr : prev;
-        }, pointsInWindow[0]);
-
-        const normValue = (closestPt.value - 30) / (180 - 30);
-        const y = height - normValue * height;
-
-        ctx.beginPath();
-        ctx.arc(x, y, 6, 0, 2 * Math.PI);
-        ctx.fill();
-
-        ctx.strokeStyle = 'darkred';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(x, y - 10);
-        ctx.lineTo(x, y + 10);
-        ctx.stroke();
-      }
-    });
-  }
-
-  // Timer functions
-  function startTimer() {
-    timerInterval = setInterval(() => {
-      timerDisplay.textContent = formatTime(elapsed);
-    }, 250);
-  }
-  function stopTimer() {
-    clearInterval(timerInterval);
-    timerDisplay.textContent = formatTime(elapsed);
-  }
-
-  // Animation loop
-  function animate() {
-    if (!recording || paused) {
-      animationFrameId = requestAnimationFrame(animate);
-      drawWaveform();
-      return;
-    }
-
-    const now = performance.now();
-    elapsed = now - startTime;
-
-    drawWaveform();
-
-    animationFrameId = requestAnimationFrame(animate);
-  }
-
-  // Bluetooth connection & handling
-  async function connectHeartRateSensor() {
+  // Connect to Bluetooth heart rate device
+  async function connectBluetooth() {
     try {
-      statusDiv.textContent = "Requesting Bluetooth device...";
       const device = await navigator.bluetooth.requestDevice({
         filters: [{ services: ['heart_rate'] }],
-        optionalServices: ['heart_rate']
       });
-      hrDevice = device;
-      statusDiv.textContent = `Connecting to ${device.name || 'sensor'}...`;
 
       const server = await device.gatt.connect();
       const service = await server.getPrimaryService('heart_rate');
       hrCharacteristic = await service.getCharacteristic('heart_rate_measurement');
 
       await hrCharacteristic.startNotifications();
+      hrCharacteristic.addEventListener('characteristicvaluechanged', handleHRChanged);
 
-      hrCharacteristic.addEventListener('characteristicvaluechanged', handleHeartRateMeasurement);
+      connectBtn.disabled = true;
+      startRecordBtn.disabled = false;
+      throbBtn.disabled = false;
 
-      statusDiv.textContent = `Connected to ${device.name || 'sensor'}`;
-      startBtn.disabled = false;
-
-      device.addEventListener('gattserverdisconnected', () => {
-        statusDiv.textContent = 'Sensor disconnected';
-        startBtn.disabled = true;
-        pauseBtn.disabled = true;
-        resumeBtn.disabled = true;
-        stopBtn.disabled = true;
-        throbBtn.disabled = true;
-      });
+      console.log('Connected to HR monitor');
     } catch (error) {
-      statusDiv.textContent = 'Connection failed or canceled';
-      console.error(error);
+      alert('Bluetooth connection failed or canceled: ' + error);
     }
   }
 
-  // Parse heart rate measurement per BLE spec
-  // Reference: https://www.bluetooth.com/specifications/gatt/viewer?attributeXmlFile=org.bluetooth.characteristic.heart_rate_measurement.xml
-  function handleHeartRateMeasurement(event) {
-    const value = event.target.value;
-    const flags = value.getUint8(0);
-    const hrFormat16Bits = flags & 0x1;
-    let heartRate = hrFormat16Bits ? value.getUint16(1, true) : value.getUint8(1);
+  // Parse heart rate from characteristic
+  function parseHeartRate(value) {
+    value = value.buffer ? value : new DataView(value);
+    let flags = value.getUint8(0);
+    let rate16Bits = flags & 0x1;
+    let bpm = rate16Bits ? value.getUint16(1, true) : value.getUint8(1);
+    return bpm;
+  }
 
-    // Try to extract RR intervals if present (flags bit 4)
-    const rrIntervals = [];
-    if (flags & 0x10) {
-      let offset = hrFormat16Bits ? 3 : 2;
-      while (offset + 1 < value.byteLength) {
-        const rr = value.getUint16(offset, true);
-        rrIntervals.push(rr);
-        offset += 2;
-      }
+  function handleHRChanged(event) {
+    const bpm = parseHeartRate(event.target.value);
+    if (bpm > 0) {
+      heartRate = bpm;
     }
+  }
 
-    // Current timestamp for this measurement
+  // Timer functions
+  function formatTime(seconds) {
+    const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+    const s = (seconds % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  }
+
+  function updateTimer() {
+    if (!isRecording || isPaused) return;
     const now = performance.now();
-
-    // If RR intervals present, we can derive beat timestamps
-    if (rrIntervals.length > 0) {
-      // RR intervals are in 1/1024 sec units
-      rrIntervals.forEach(rr => {
-        // Convert to ms
-        const rrMs = rr / 1024 * 1000;
-
-        // We'll approximate the beat time as "now - rrMs"
-        // For smoother waveform, we store beat times and interpolate bpm
-        // Push beat time for use
-        pulseDataBuffer.push({ timestamp: now - rrMs });
-      });
-    } else {
-      // No RR intervals - fallback to just current heart rate value
-      pulseDataBuffer.push({ timestamp: now });
-    }
-
-    // Update pulse bpm dataPoints for visualization and recording
-    // We'll smooth BPM by averaging over last 5 beats spaced by RR intervals or using the current heartRate
-    // Simplification: Just use heartRate value tied to now
-    if (recording && !paused) {
-      dataPoints.push({ time: now - startTime, value: heartRate });
-      // Limit size for performance
-      if (dataPoints.length > 1000) dataPoints.shift();
-    }
+    const elapsed = (now - recordStartTime) / 1000 + elapsedBeforePause;
+    timerDisplay.textContent = formatTime(Math.floor(elapsed));
+    return elapsed;
   }
 
-  // Controls handlers
-  connectSensorBtn.onclick = () => {
-    if (!navigator.bluetooth) {
-      alert('Web Bluetooth is not supported on this browser.');
-      return;
-    }
-    connectHeartRateSensor();
-  };
+  // Drawing sinusoidal pulse wave with throbs marked
+  function drawSineWave(hr, throbs) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.beginPath();
 
-  startBtn.onclick = () => {
-    if (recording) return;
-    recording = true;
-    paused = false;
-    startTime = performance.now();
-    elapsed = 0;
-    dataPoints = [];
-    throbs = [];
+    const frequency = hr / 60; // beats per second
+    const amplitude = 50;
+    const centerY = canvas.height / 2;
 
-    startBtn.disabled = true;
-    pauseBtn.disabled = false;
-    resumeBtn.disabled = true;
-    stopBtn.disabled = false;
-    throbBtn.disabled = false;
-
-    startTimer();
-    animate();
-  };
-
-  pauseBtn.onclick = () => {
-    if (!recording || paused) return;
-    paused = true;
-    pauseBtn.disabled = true;
-    resumeBtn.disabled = false;
-    stopTimer();
-  };
-
-  resumeBtn.onclick = () => {
-    if (!recording || !paused) return;
-    paused = false;
-    pauseBtn.disabled = false;
-    resumeBtn.disabled = true;
-
-    startTime = performance.now() - elapsed;
-    startTimer();
-  };
-
-  stopBtn.onclick = () => {
-    if (!recording) return;
-    recording = false;
-    paused = false;
-
-    startBtn.disabled = false;
-    pauseBtn.disabled = true;
-    resumeBtn.disabled = true;
-    stopBtn.disabled = true;
-    throbBtn.disabled = true;
-
-    stopTimer();
-    cancelAnimationFrame(animationFrameId);
-
-    // Save recording
-    if (dataPoints.length > 0) {
-      const recordingData = {
-        id: Date.now(),
-        dataPoints: [...dataPoints],
-        throbs: [...throbs],
-        duration: elapsed,
-        timestamp: new Date().toISOString(),
-        label: '',
-      };
-      recordings.push(recordingData);
-      addRecordingToList(recordingData);
-      downloadAllBtn.disabled = false;
+    for (let x = 0; x < canvas.width; x++) {
+      // Map x to time window of 10 seconds for visualization
+      const t = (time / 60) + (x / canvas.width) * 10;
+      const y = centerY + amplitude * Math.sin(2 * Math.PI * frequency * t);
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     }
 
-    dataPoints = [];
-    throbs = [];
-  };
+    ctx.strokeStyle = 'red';
+    ctx.lineWidth = 2;
+    ctx.stroke();
 
-  throbBtn.onclick = () => {
-    if (!recording || paused) return;
-    throbs.push({ time: elapsed });
-  };
-
-  // Add recording UI
-  function addRecordingToList(record) {
-    const div = document.createElement('div');
-    div.className = 'recording-item';
-    div.dataset.id = record.id;
-
-    const labelInput = document.createElement('input');
-    labelInput.type = 'text';
-    labelInput.placeholder = 'Label this recording';
-    labelInput.value = record.label;
-    labelInput.oninput = (e) => {
-      record.label = e.target.value;
-    };
-
-    const info = document.createElement('div');
-    info.className = 'recording-info';
-    info.textContent = `Duration: ${formatTime(record.duration)}`;
-
-    const playBtn = document.createElement('button');
-    playBtn.textContent = 'Play';
-    playBtn.className = 'btn-small';
-    playBtn.onclick = () => playRecording(record);
-
-    const downloadBtn = document.createElement('button');
-    downloadBtn.textContent = 'Download';
-    downloadBtn.className = 'btn-small';
-    downloadBtn.onclick = () => downloadRecording(record);
-
-    div.appendChild(labelInput);
-    div.appendChild(info);
-    div.appendChild(playBtn);
-    div.appendChild(downloadBtn);
-
-    recordingsContainer.appendChild(div);
-  }
-
-  // Playback
-  let playbackIndex = 0;
-  let playbackTimer = null;
-
-  function playRecording(record) {
-    if (playbackTimer) {
-      clearInterval(playbackTimer);
-      playbackTimer = null;
-      startBtn.disabled = false;
-      pauseBtn.disabled = true;
-      resumeBtn.disabled = true;
-      stopBtn.disabled = true;
-      throbBtn.disabled = true;
-      return;
-    }
-
-    startBtn.disabled = true;
-    pauseBtn.disabled = true;
-    resumeBtn.disabled = true;
-    stopBtn.disabled = true;
-    throbBtn.disabled = true;
-
-    ctx.clearRect(0, 0, width, height);
-
-    const startPlaybackTime = performance.now();
-    playbackIndex = 0;
-
-    playbackTimer = setInterval(() => {
-      const elapsedPlayback = performance.now() - startPlaybackTime;
-
-      // Draw the waveform at this elapsedPlayback
-      ctx.clearRect(0, 0, width, height);
-
-      // Draw baseline
-      ctx.strokeStyle = '#ccc';
-      ctx.beginPath();
-      ctx.moveTo(0, height / 2);
-      ctx.lineTo(width, height / 2);
-      ctx.stroke();
-
-      // Filter points in window (last 10s or full duration)
-      const points = record.dataPoints.filter(p => p.time <= elapsedPlayback);
-
-      if (points.length === 0) {
-        ctx.fillStyle = '#888';
-        ctx.font = '16px Arial';
-        ctx.fillText('Playing back...', width / 2 - 50, height / 2);
-        return;
-      }
-
-      ctx.strokeStyle = '#007acc';
+    // Draw throbs as vertical lines on exact time
+    if (throbs.length > 0) {
+      ctx.strokeStyle = 'blue';
       ctx.lineWidth = 2;
-      ctx.beginPath();
-
-      const windowDuration = 10 * 1000;
-      const startWindow = Math.max(0, elapsedPlayback - windowDuration);
-
-      const pointsInWindow = points.filter(p => p.time >= startWindow);
-
-      pointsInWindow.forEach((pt, i) => {
-        const normValue = (pt.value - 30) / (180 - 30);
-        const y = height - normValue * height;
-        const x = ((pt.time - startWindow) / windowDuration) * width;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.stroke();
-
-      // Draw throb markers
-      ctx.fillStyle = 'red';
-      record.throbs.forEach(throb => {
-        if (throb.time >= startWindow && throb.time <= elapsedPlayback) {
-          const x = ((throb.time - startWindow) / windowDuration) * width;
-          let closestPt = pointsInWindow.reduce((prev, curr) => {
-            return Math.abs(curr.time - throb.time) < Math.abs(prev.time - throb.time) ? curr : prev;
-          }, pointsInWindow[0]);
-          const normValue = (closestPt.value - 30) / (180 - 30);
-          const y = height - normValue * height;
-
+      throbs.forEach(throbTime => {
+        // Check if throbTime is within displayed 10-second window
+        if (throbTime >= time && throbTime <= time + 10) {
+          const xPos = ((throbTime - time) / 10) * canvas.width;
           ctx.beginPath();
-          ctx.arc(x, y, 6, 0, 2 * Math.PI);
-          ctx.fill();
-
-          ctx.strokeStyle = 'darkred';
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.moveTo(x, y - 10);
-          ctx.lineTo(x, y + 10);
+          ctx.moveTo(xPos, 0);
+          ctx.lineTo(xPos, canvas.height);
           ctx.stroke();
         }
       });
-
-      if (elapsedPlayback > record.duration + 1000) {
-        clearInterval(playbackTimer);
-        playbackTimer = null;
-        startBtn.disabled = false;
-      }
-    }, 40);
+    }
   }
 
-  // Download recording as JSON file
-  function downloadRecording(record) {
-    const dataStr = JSON.stringify(record, null, 2);
-    const blob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
+  // Animation loop
+  let lastTimestamp = null;
+  let throbTimes = [];
 
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `pulse_recording_${record.id}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+  function animate(timestamp) {
+    if (!lastTimestamp) lastTimestamp = timestamp;
+    const delta = (timestamp - lastTimestamp) / 1000;
+    lastTimestamp = timestamp;
+
+    if (isRecording && !isPaused) {
+      time += delta; // advance time in seconds
+    }
+
+    drawSineWave(heartRate, throbTimes);
+
+    // Record data if recording & not paused
+    if (isRecording && !isPaused) {
+      recordedData.push({
+        time: time,
+        hr: heartRate,
+        throb: false
+      });
+    }
+
+    animationId = requestAnimationFrame(animate);
   }
 
-  // Download all recordings as ZIP
-  downloadAllBtn.onclick = async () => {
-    if (recordings.length === 0) return;
+  // Button handlers
 
-    const zip = new JSZip();
-    recordings.forEach((rec, i) => {
-      const filename = `pulse_recording_${rec.id}.json`;
-      zip.file(filename, JSON.stringify(rec, null, 2));
-    });
+  connectBtn.onclick = () => connectBluetooth();
 
-    const content = await zip.generateAsync({ type: 'blob' });
+  startRecordBtn.onclick = () => {
+    isRecording = true;
+    isPaused = false;
+    recordStartTime = performance.now();
+    elapsedBeforePause = 0;
+    recordedData = [];
+    throbTimes = [];
+    time = 0;
 
-    const url = URL.createObjectURL(content);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'pulse_recordings.zip';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    startRecordBtn.disabled = true;
+    pauseRecordBtn.disabled = false;
+    resumeRecordBtn.disabled = true;
+    stopRecordBtn.disabled = false;
+    throbBtn.disabled = false;
   };
 
-  // Initialize UI state
-  startBtn.disabled = true;
-  pauseBtn.disabled = true;
-  resumeBtn.disabled = true;
-  stopBtn.disabled = true;
-  throbBtn.disabled = true;
-  downloadAllBtn.disabled = true;
+  pauseRecordBtn.onclick = () => {
+    if (!isRecording || isPaused) return;
+    isPaused = true;
+    elapsedBeforePause += (performance.now() - recordStartTime) / 1000;
 
+    pauseRecordBtn.disabled = true;
+    resumeRecordBtn.disabled = false;
+  };
+
+  resumeRecordBtn.onclick = () => {
+    if (!isRecording || !isPaused) return;
+    isPaused = false;
+    recordStartTime = performance.now();
+
+    pauseRecordBtn.disabled = false;
+    resumeRecordBtn.disabled = true;
+  };
+
+  stopRecordBtn.onclick = () => {
+    if (!isRecording) return;
+    isRecording = false;
+    isPaused = false;
+
+    startRecordBtn.disabled = false;
+    pauseRecordBtn.disabled = true;
+    resumeRecordBtn.disabled = true;
+    stopRecordBtn.disabled = true;
+    throbBtn.disabled = true;
+
+    timerDisplay.textContent = '00:00';
+
+    // Save current recording
+    saveRecording();
+  };
+
+  throbBtn.onclick = () => {
+    if (!isRecording || isPaused) return;
+    throbTimes.push(time);
+
+    // Mark throb in recordedData as well
+    recordedData.push({
+      time: time,
+      hr: heartRate,
+      throb: true
+    });
+  };
+
+  // Save recording as CSV with prompt to name recording
+  function saveRecording() {
+    let name = prompt('Enter a name for this recording:', `Recording_${recordings.length + 1}`);
+    if (!name) name = `Recording_${recordings.length + 1}`;
+
+    // Prepare CSV data: time, heart rate, throb (1 or 0)
+    const csvRows = [];
+    csvRows.push('time(s),heart_rate_bpm,throb');
+    recordedData.forEach(row => {
+      csvRows.push(`${row.time.toFixed(2)},${row.hr},${row.throb ? 1 : 0}`);
+    });
+    const csvContent = csvRows.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+
+    recordings.push({ name, url });
+    updateRecordingsList();
+  }
+
+  function updateRecordingsList() {
+    const list = document.createElement('div');
+    list.innerHTML = '';
+    recordings.forEach((rec, idx) => {
+      const div = document.createElement('div');
+      div.className = 'recordingItem';
+      div.innerHTML = `
+        <strong>${rec.name}</strong>
+        &nbsp; <a href="${rec.url}" download="${rec.name}.csv">Download CSV</a>
+      `;
+      list.appendChild(div);
+    });
+    // Clear old and append new list
+    while (recordingsList.childNodes.length > 1) {
+      recordingsList.removeChild(recordingsList.lastChild);
+    }
+    recordingsList.appendChild(list);
+  }
+
+  // Start animation
+  animationId = requestAnimationFrame(animate);
 })();
 </script>
 
