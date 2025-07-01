@@ -60,20 +60,22 @@
   let isConnected = false;
 
   // Data storage
-  let pulseDataQueue = []; // {time: ms, value: bpm}
-  const maxDataPoints = 900; // For 1 second per pixel, 900px width canvas = 15min approx, but shorter recordings are expected
-  let throbs = []; // {time: ms}
+  let pulseDataQueue = [];
+  const maxDataPoints = 900;
+  let throbs = [];
 
   // Recording state
   let isRecording = false;
   let isPaused = false;
-  let recordingData = null; // {name: string, pulses: [], throbs: []}
+  let recordingData = null;
   let timerInterval = null;
   let recordStartTime = 0;
   let pausedDuration = 0;
   let pauseStart = 0;
 
-  // Time helpers
+  // Drawing loop control
+  let drawLoopStarted = false;
+
   function formatTime(ms) {
     const totalSeconds = Math.floor(ms / 1000);
     const minutes = Math.floor(totalSeconds / 60).toString().padStart(2,'0');
@@ -81,10 +83,8 @@
     return `${minutes}:${seconds}`;
   }
 
-  // Clear canvas fully
   function clearCanvas() {
     ctx.clearRect(0, 0, width, height);
-    // Draw baseline grid
     ctx.strokeStyle = '#eee';
     ctx.lineWidth = 1;
     for(let y=0; y<=height; y+=30) {
@@ -95,22 +95,15 @@
     }
   }
 
-  // Draw pulse waveform and throb markers
   function drawWaveform() {
     clearCanvas();
     if (pulseDataQueue.length < 2) return;
 
-    // Compute visible window: last maxDataPoints or less
-    // We align data so time zero is record start (or 0 if no record)
-    // We'll map time differences to canvas X: latest data on right (width), older on left.
-
     const now = Date.now();
     const startTime = recordStartTime || (pulseDataQueue[0]?.time || now);
 
-    // Time window length to display (ms)
-    const displayDuration = 30 * 1000; // Show last 30 seconds on canvas
+    const displayDuration = 30 * 1000;
 
-    // Draw pulse waveform
     ctx.strokeStyle = '#0077cc';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -121,10 +114,8 @@
       if (t < 0) continue;
       if (t > displayDuration) continue;
 
-      // Map time to x
       const x = (t / displayDuration) * width;
 
-      // Map pulse bpm to y - assuming bpm range 40 to 140 for scaling
       const bpm = point.value;
       const minBPM = 40;
       const maxBPM = 140;
@@ -139,17 +130,15 @@
     }
     ctx.stroke();
 
-    // Draw throb markers
     ctx.fillStyle = 'red';
     ctx.strokeStyle = 'darkred';
     ctx.lineWidth = 1;
     throbs.forEach(throbTime => {
       const t = throbTime - startTime;
-      if (t < 0 || t > displayDuration) return; // Outside display window
+      if (t < 0 || t > displayDuration) return;
       const x = (t / displayDuration) * width;
 
-      // Find pulse value at throb time for y position (linear interp)
-      let y = height/2; // fallback
+      let y = height/2;
       for(let i=0; i < pulseDataQueue.length -1; i++) {
         if (pulseDataQueue[i].time <= throbTime && pulseDataQueue[i+1].time >= throbTime) {
           const p1 = pulseDataQueue[i];
@@ -161,7 +150,6 @@
           break;
         }
       }
-      // Draw vertical marker line + circle
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, height);
@@ -174,7 +162,6 @@
     });
   }
 
-  // Update timer display
   function updateTimer() {
     if (!isRecording) return;
     const now = Date.now();
@@ -192,7 +179,6 @@
     timerLabel.textContent = "00:00";
   }
 
-  // Add pulse data from Bluetooth
   function addPulseData(value) {
     const now = Date.now();
     if (pulseDataQueue.length >= maxDataPoints) {
@@ -205,25 +191,24 @@
     }
   }
 
-  // Handle incoming pulse data from Bluetooth characteristic
   function handlePulseData(event) {
     const value = event.target.value;
-    // Usually heart rate measurement is in first byte, but depends on device
-    // We'll parse as UInt8 for now (heart rate bpm)
-    let bpm = 0;
-    // According to Heart Rate Measurement spec:
-    // Flags = value.getUint8(0)
-    // If bit0=0 bpm 1 byte else 2 bytes
     const flags = value.getUint8(0);
+    let bpm = 0;
     if ((flags & 0x01) === 0) {
       bpm = value.getUint8(1);
     } else {
-      bpm = value.getUint16(1, /*littleEndian=*/true);
+      bpm = value.getUint16(1, true);
     }
-    if (bpm > 0) addPulseData(bpm);
+    if (bpm > 0) {
+      addPulseData(bpm);
+      if (!drawLoopStarted) {
+        drawLoopStarted = true;
+        requestAnimationFrame(drawLoop);
+      }
+    }
   }
 
-  // Connect to Bluetooth Pulse Sensor
   async function connectBluetooth() {
     try {
       connectBtn.disabled = true;
@@ -247,8 +232,6 @@
 
       bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
 
-      drawLoop();
-
     } catch (err) {
       alert('Bluetooth connection failed or cancelled.');
       console.error(err);
@@ -260,159 +243,4 @@
   function onDisconnected() {
     alert('Bluetooth device disconnected.');
     isConnected = false;
-    connectBtn.disabled = false;
-    connectBtn.textContent = 'Connect Bluetooth Pulse Sensor';
-    startBtn.disabled = true;
-    pauseBtn.disabled = true;
-    resumeBtn.disabled = true;
-    stopBtn.disabled = true;
-    throbBtn.disabled = true;
-    isRecording = false;
-    isPaused = false;
-    clearCanvas();
-  }
-
-  // Draw loop to keep waveform updating every animation frame
-  function drawLoop() {
-    drawWaveform();
-    requestAnimationFrame(drawLoop);
-  }
-
-  // Start Recording
-  function startRecording() {
-    if (!isConnected) {
-      alert('Please connect to Bluetooth pulse sensor first.');
-      return;
-    }
-    recordingData = {
-      name: `Recording_${new Date().toISOString().replace(/[:.]/g, '-')}`,
-      pulses: [],
-      throbs: []
-    };
-    pulseDataQueue = []; // Clear old data
-    throbs = [];
-    isRecording = true;
-    isPaused = false;
-    recordStartTime = Date.now();
-    pausedDuration = 0;
-    pauseStart = 0;
-
-    startBtn.disabled = true;
-    pauseBtn.disabled = false;
-    resumeBtn.disabled = true;
-    stopBtn.disabled = false;
-    throbBtn.disabled = false;
-
-    startTimer();
-  }
-
-  // Pause Recording
-  function pauseRecording() {
-    if (!isRecording || isPaused) return;
-    isPaused = true;
-    pauseStart = Date.now();
-    pauseBtn.disabled = true;
-    resumeBtn.disabled = false;
-    throbBtn.disabled = true;
-  }
-
-  // Resume Recording
-  function resumeRecording() {
-    if (!isRecording || !isPaused) return;
-    isPaused = false;
-    pausedDuration += Date.now() - pauseStart;
-    pauseStart = 0;
-    pauseBtn.disabled = false;
-    resumeBtn.disabled = true;
-    throbBtn.disabled = false;
-  }
-
-  // Stop Recording
-  function stopRecording() {
-    if (!isRecording) return;
-    isRecording = false;
-    isPaused = false;
-
-    startBtn.disabled = false;
-    pauseBtn.disabled = true;
-    resumeBtn.disabled = true;
-    stopBtn.disabled = true;
-    throbBtn.disabled = true;
-
-    stopTimer();
-
-    saveRecording(recordingData);
-
-    recordingData = null;
-    pulseDataQueue = [];
-    throbs = [];
-    clearCanvas();
-  }
-
-  // Mark Throb at current timepoint
-  function markThrob() {
-    if (!isRecording || isPaused) return;
-    const now = Date.now();
-    throbs.push(now);
-    // Save relative time in recording data
-    recordingData.throbs.push(now - recordStartTime - pausedDuration);
-  }
-
-  // Save recording to the list and allow CSV download
-  function saveRecording(rec) {
-    // Prepare CSV content
-    // Columns: time(ms), pulseBPM, throb (1 if throb at this time else 0)
-    // For simplicity, we create rows for pulse timestamps, mark throb=1 if any throb within 500ms
-
-    let csv = 'time(ms),pulseBPM,throb\n';
-
-    let throbIndex = 0;
-    const throbTolerance = 500; // ms range to match pulse time
-
-    for(let i=0; i<rec.pulses.length; i++) {
-      const p = rec.pulses[i];
-      let throbMark = 0;
-
-      while(throbIndex < rec.throbs.length && rec.throbs[throbIndex] < p.time - throbTolerance) {
-        throbIndex++;
-      }
-      if(throbIndex < rec.throbs.length) {
-        const dt = Math.abs(rec.throbs[throbIndex] - p.time);
-        if(dt <= throbTolerance) throbMark = 1;
-      }
-
-      csv += `${p.time},${p.value},${throbMark}\n`;
-    }
-
-    // Create UI item for this recording
-    const div = document.createElement('div');
-    div.className = 'recording-item';
-    const nameSpan = document.createElement('span');
-    nameSpan.textContent = rec.name;
-    nameSpan.className = 'recording-name';
-
-    const downloadLink = document.createElement('a');
-    downloadLink.textContent = 'Download CSV';
-    downloadLink.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
-    downloadLink.download = rec.name + '.csv';
-    downloadLink.className = 'download-link';
-
-    div.appendChild(nameSpan);
-    div.appendChild(downloadLink);
-    recordingsList.appendChild(div);
-  }
-
-  // Hook up buttons
-  connectBtn.onclick = connectBluetooth;
-  startBtn.onclick = startRecording;
-  pauseBtn.onclick = pauseRecording;
-  resumeBtn.onclick = resumeRecording;
-  stopBtn.onclick = stopRecording;
-  throbBtn.onclick = markThrob;
-
-  clearCanvas();
-})();
-</script>
-
-</body>
-</html>
+    connect
